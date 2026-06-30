@@ -7,12 +7,124 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model Rol {
+  id       Int       @id @default(autoincrement())
+  nombre   String    @unique
+  usuarios Usuario[]
+}
+
 model Usuario {
-  id        Int      @id @default(autoincrement())
-  nombre    String
-  email     String   @unique
-  password  String
-  telefono  String
-  rol       String
-  creadoEn DateTime @default(now())
+  id             Int            @id @default(autoincrement())
+  nombre         String
+  email          String         @unique
+  password       String
+  telefono       String
+  activo         Boolean        @default(true)
+  rolId          Int
+  rol            Rol            @relation(fields: [rolId], references: [id])
+  creadoEn       DateTime       @default(now())
+  musico         Musico?
+  local          Local?
+  notificaciones Notificacion[]
+}
+
+model Genero {
+  id      Int           @id @default(autoincrement())
+  nombre  String        @unique
+  musicos MusicoGenero[]
+}
+
+model MusicoGenero {
+  musicoId Int
+  generoId Int
+  musico   Musico @relation(fields: [musicoId], references: [id])
+  genero   Genero @relation(fields: [generoId], references: [id])
+
+  @@id([musicoId, generoId])
+}
+
+model Musico {
+  id              Int            @id @default(autoincrement())
+  usuarioId       Int            @unique
+  usuario         Usuario        @relation(fields: [usuarioId], references: [id])
+  nombreArtistico String
+  foto            String?
+  galeria         Json?
+  biografia       String?        @db.Text
+  precioPorHora   Decimal        @db.Decimal(10, 2)
+  localidad       String
+  generos         MusicoGenero[]
+  solicitudes     Solicitud[]
+  resenas         Resena[]
+}
+
+model Local {
+  id            Int         @id @default(autoincrement())
+  usuarioId     Int         @unique
+  usuario       Usuario     @relation(fields: [usuarioId], references: [id])
+  nombreNegocio String
+  ubicacion     String
+  descripcion   String?     @db.Text
+  foto          String?
+  galeria       Json?
+  solicitudes   Solicitud[]
+  resenas       Resena[]
+}
+
+model Solicitud {
+  id             Int            @id @default(autoincrement())
+  localId        Int
+  local          Local          @relation(fields: [localId], references: [id])
+  musicoId       Int
+  musico         Musico         @relation(fields: [musicoId], references: [id])
+  fecha          DateTime
+  duracionHoras  Int
+  horaInicio     String
+  horaFin        String
+  tipoEvento     String?
+  notas          String?        @db.Text
+  montoMusico    Decimal        @db.Decimal(10, 2)
+  comisionApp    Decimal        @db.Decimal(10, 2)
+  montoTotal     Decimal        @db.Decimal(10, 2)
+  estado         String         @default("pendiente")
+  creadoEn       DateTime       @default(now())
+  pago           Pago?
+  notificaciones Notificacion[]
+}
+
+model Pago {
+  id            Int       @id @default(autoincrement())
+  solicitudId   Int       @unique
+  solicitud     Solicitud @relation(fields: [solicitudId], references: [id])
+  monto         Decimal   @db.Decimal(10, 2)
+  montoRetenido Decimal   @db.Decimal(10, 2)
+  montoLiberado Decimal   @db.Decimal(10, 2) @default(0)
+  estado        String    @default("retenido")
+  mpPagoId      String?
+  musicoLlego   Boolean   @default(false)
+  fechaPago     DateTime?
+  creadoEn      DateTime  @default(now())
+}
+
+model Resena {
+  id           Int      @id @default(autoincrement())
+  localId      Int
+  local        Local    @relation(fields: [localId], references: [id])
+  musicoId     Int
+  musico       Musico   @relation(fields: [musicoId], references: [id])
+  calificacion Int
+  comentario   String?  @db.Text
+  creadoEn     DateTime @default(now())
+}
+
+model Notificacion {
+  id          Int        @id @default(autoincrement())
+  usuarioId   Int
+  usuario     Usuario    @relation(fields: [usuarioId], references: [id])
+  solicitudId Int?
+  solicitud   Solicitud? @relation(fields: [solicitudId], references: [id])
+  tipo        String
+  mensaje     String
+  leida       Boolean    @default(false)
+  creadoEn    DateTime   @default(now())
 }
