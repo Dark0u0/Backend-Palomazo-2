@@ -2,6 +2,8 @@ const express = require('express')
 const cors = require('cors')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
+const crypto = require('crypto')
+const nodemailer = require('nodemailer')
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
 
@@ -13,10 +15,18 @@ app.use(cors({
 }))
 app.use(express.json())
 
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASS
+  }
+})
+
 // ─── MIDDLEWARE: VALIDAR SESIÓN ACTIVA ────────────────────────
 const validarSesion = async (req, res, next) => {
   const authHeader = req.headers['authorization']
-  if (!authHeader) return next() // rutas públicas pasan sin token
+  if (!authHeader) return next()
 
   const token = authHeader.split(' ')[1]
   if (!token) return next()
@@ -33,7 +43,7 @@ const validarSesion = async (req, res, next) => {
     }
 
     if (usuario.sessionToken !== token) {
-      return res.status(401).json({ 
+      return res.status(401).json({
         error: 'Tu sesión fue cerrada porque iniciaste sesión en otro dispositivo',
         codigo: 'SESION_DESPLAZADA'
       })
@@ -42,7 +52,7 @@ const validarSesion = async (req, res, next) => {
     req.usuarioId = decoded.id
     next()
   } catch (e) {
-    next() // token inválido o expirado, deja pasar (las rutas públicas no lo necesitan)
+    next()
   }
 }
 
@@ -148,7 +158,6 @@ app.post('/auth/login', async (req, res) => {
       { expiresIn: '7d' }
     )
 
-    // Guardar el nuevo token como sesión activa (invalida la anterior)
     await prisma.usuario.update({
       where: { id: usuario.id },
       data: { sessionToken: token }
@@ -175,6 +184,7 @@ app.post('/auth/login', async (req, res) => {
     res.status(500).json({ error: 'Error del servidor' })
   }
 })
+
 // ─── LOGOUT ───────────────────────────────────────────────────
 app.post('/auth/logout', async (req, res) => {
   const { id } = req.body
@@ -189,7 +199,84 @@ app.post('/auth/logout', async (req, res) => {
   }
 })
 
-// ─── CONFIGURACIÓN CLOUDINARY ───────────────────────────────
+// ─── SOLICITAR RECUPERACIÓN DE CONTRASEÑA ─────────────────────
+app.post('/auth/recuperar', async (req, res) => {
+  const { email } = req.body
+  try {
+    const usuario = await prisma.usuario.findUnique({ where: { email } })
+
+    if (!usuario) {
+      return res.json({ mensaje: 'Si el email existe, recibirás un correo en breve' })
+    }
+
+    const token = crypto.randomBytes(32).toString('hex')
+    const expira = new Date(Date.now() + 60 * 60 * 1000)
+
+    await prisma.usuario.update({
+      where: { email },
+      data: { resetToken: token, resetTokenExpira: expira }
+    })
+
+    const linkReset = `https://frontend-palomazo.vercel.app/reset-password?token=${token}`
+
+    await transporter.sendMail({
+      from: `"Palomazo" <${process.env.GMAIL_USER}>`,
+      to: email,
+      subject: 'Recupera tu contraseña de Palomazo',
+      html: `
+        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #0F0F0F; color: #fff; border-radius: 12px;">
+          <h2 style="color: #7C3AED;">🎵 Palomazo</h2>
+          <p>Recibimos una solicitud para restablecer tu contraseña.</p>
+          <p>Haz clic en el botón de abajo. El link expira en <strong>1 hora</strong>.</p>
+          <a href="${linkReset}" style="display: inline-block; margin: 24px 0; padding: 14px 28px; background: #7C3AED; color: #fff; border-radius: 8px; text-decoration: none; font-weight: bold;">
+            Restablecer contraseña
+          </a>
+          <p style="color: #666; font-size: 13px;">Si no solicitaste esto, ignora este correo.</p>
+        </div>
+      `
+    })
+
+    res.json({ mensaje: 'Si el email existe, recibirás un correo en breve' })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Error al procesar la solicitud' })
+  }
+})
+
+// ─── RESTABLECER CONTRASEÑA ────────────────────────────────────
+app.post('/auth/reset-password', async (req, res) => {
+  const { token, password } = req.body
+  try {
+    const usuario = await prisma.usuario.findFirst({
+      where: {
+        resetToken: token,
+        resetTokenExpira: { gt: new Date() }
+      }
+    })
+
+    if (!usuario) {
+      return res.status(400).json({ error: 'El link es inválido o ya expiró' })
+    }
+
+    const hash = await bcrypt.hash(password, 10)
+
+    await prisma.usuario.update({
+      where: { id: usuario.id },
+      data: {
+        password: hash,
+        resetToken: null,
+        resetTokenExpira: null,
+        sessionToken: null
+      }
+    })
+
+    res.json({ mensaje: 'Contraseña actualizada correctamente' })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Error al restablecer la contraseña' })
+  }
+})
+
 const cloudinary = require('cloudinary').v2
 const { CloudinaryStorage } = require('multer-storage-cloudinary')
 const multer = require('multer')
@@ -219,7 +306,7 @@ app.post('/upload/foto', upload.single('foto'), async (req, res) => {
   }
 })
 
-// ─── OBTENER MÚSICOS (para buscar músicos) ────────────────────
+// ─── OBTENER MÚSICOS ──────────────────────────────────────────
 app.get('/musicos', async (req, res) => {
   try {
     const musicos = await prisma.musico.findMany({
@@ -257,7 +344,12 @@ app.get('/musicos/:id', async (req, res) => {
       include: {
         usuario: { select: { nombre: true, email: true, telefono: true } },
         generos: { include: { genero: true } },
-        resenas: { include: { local: { include: { usuario: { select: { nombre: true } } } } } }
+        resenas: {
+          include: {
+            local: { select: { nombreNegocio: true, foto: true } }
+          },
+          orderBy: { creadoEn: 'desc' }
+        }
       }
     })
     if (!m) return res.status(404).json({ error: 'Músico no encontrado' })
@@ -273,7 +365,7 @@ app.get('/musicos/:id', async (req, res) => {
   }
 })
 
-// ─── OBTENER LOCAL POR ID (perfil completo) ────────────────────
+// ─── OBTENER LOCAL POR ID ─────────────────────────────────────
 app.get('/local/:id', async (req, res) => {
   try {
     const local = await prisma.local.findUnique({
@@ -287,7 +379,7 @@ app.get('/local/:id', async (req, res) => {
   }
 })
 
-// ─── CREAR SOLICITUD (Local → Músico) ──────────────────────────
+// ─── CREAR SOLICITUD ──────────────────────────────────────────
 app.post('/solicitudes', async (req, res) => {
   const { localId, musicoId, fecha, duracionHoras, horaInicio, horaFin, tipoEvento, precioPorHora } = req.body
   try {
@@ -329,7 +421,7 @@ app.post('/solicitudes', async (req, res) => {
   }
 })
 
-// ─── SOLICITUDES DE UN LOCAL (Confirmación y pagos) ────────────
+// ─── SOLICITUDES DE UN LOCAL ──────────────────────────────────
 app.get('/solicitudes/local/:localId', async (req, res) => {
   try {
     const solicitudes = await prisma.solicitud.findMany({
@@ -346,7 +438,7 @@ app.get('/solicitudes/local/:localId', async (req, res) => {
   }
 })
 
-// ─── SOLICITUDES DE UN MÚSICO ───────────────────────────────────
+// ─── SOLICITUDES DE UN MÚSICO ─────────────────────────────────
 app.get('/solicitudes/musico/:musicoId', async (req, res) => {
   try {
     const solicitudes = await prisma.solicitud.findMany({
@@ -363,9 +455,9 @@ app.get('/solicitudes/musico/:musicoId', async (req, res) => {
   }
 })
 
-// ─── MÚSICO RESPONDE (aceptar / rechazar) ──────────────────────
+// ─── MÚSICO RESPONDE ──────────────────────────────────────────
 app.put('/solicitudes/:id/responder', async (req, res) => {
-  const { respuesta } = req.body // 'aceptada' | 'rechazada'
+  const { respuesta } = req.body
   try {
     const solicitud = await prisma.solicitud.update({
       where: { id: parseInt(req.params.id) },
@@ -386,7 +478,7 @@ app.put('/solicitudes/:id/responder', async (req, res) => {
   }
 })
 
-// ─── LOCAL PAGA (crea el escrow, 35% anticipo / 65% retenido) ──
+// ─── LOCAL PAGA (35% anticipo / 65% retenido) ─────────────────
 app.post('/solicitudes/:id/pagar', async (req, res) => {
   try {
     const solicitud = await prisma.solicitud.findUnique({ where: { id: parseInt(req.params.id) } })
@@ -415,7 +507,7 @@ app.post('/solicitudes/:id/pagar', async (req, res) => {
   }
 })
 
-// ─── PAGOS DE UN LOCAL (para el Dashboard / escrow) ─────────────
+// ─── PAGOS DE UN LOCAL ────────────────────────────────────────
 app.get('/pagos/local/:localId', async (req, res) => {
   try {
     const pagos = await prisma.pago.findMany({
@@ -432,6 +524,34 @@ app.get('/pagos/local/:localId', async (req, res) => {
     res.json(pagos)
   } catch (e) {
     res.status(500).json({ error: 'Error del servidor' })
+  }
+})
+
+// ─── LIBERAR PAGO ─────────────────────────────────────────────
+app.put('/pagos/:id/liberar', async (req, res) => {
+  try {
+    const pagoActual = await prisma.pago.findUnique({ where: { id: parseInt(req.params.id) } })
+    const pago = await prisma.pago.update({
+      where: { id: parseInt(req.params.id) },
+      data: { estado: 'liberado', montoLiberado: pagoActual.monto, montoRetenido: 0, musicoLlego: true }
+    })
+    res.json(pago)
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Error al liberar el pago' })
+  }
+})
+
+// ─── CANCELAR PAGO ────────────────────────────────────────────
+app.put('/pagos/:id/cancelar', async (req, res) => {
+  try {
+    const pago = await prisma.pago.update({
+      where: { id: parseInt(req.params.id) },
+      data: { estado: 'cancelado' }
+    })
+    res.json(pago)
+  } catch (e) {
+    res.status(500).json({ error: 'Error al cancelar el pago' })
   }
 })
 
@@ -463,6 +583,19 @@ app.post('/resenas', async (req, res) => {
   }
 })
 
+// ─── DESCARTAR RESEÑA ─────────────────────────────────────────
+app.put('/pagos/:id/skip-resena', async (req, res) => {
+  try {
+    const pago = await prisma.pago.update({
+      where: { id: parseInt(req.params.id) },
+      data: { resenado: true }
+    })
+    res.json(pago)
+  } catch (e) {
+    res.status(500).json({ error: 'Error del servidor' })
+  }
+})
+
 // ─── OBTENER RESEÑAS DE UN MÚSICO ─────────────────────────────
 app.get('/resenas/musico/:musicoId', async (req, res) => {
   try {
@@ -474,34 +607,6 @@ app.get('/resenas/musico/:musicoId', async (req, res) => {
     res.json(resenas)
   } catch (e) {
     res.status(500).json({ error: 'Error del servidor' })
-  }
-})
-
-// ─── LIBERAR PAGO (escrow) — libera el 65% restante ─────────────
-app.put('/pagos/:id/liberar', async (req, res) => {
-  try {
-    const pagoActual = await prisma.pago.findUnique({ where: { id: parseInt(req.params.id) } })
-    const pago = await prisma.pago.update({
-      where: { id: parseInt(req.params.id) },
-      data: { estado: 'liberado', montoLiberado: pagoActual.monto, montoRetenido: 0, musicoLlego: true }
-    })
-    res.json(pago)
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Error al liberar el pago' })
-  }
-})
-
-// ─── CANCELAR PAGO (escrow) ──────────────────────────────────────
-app.put('/pagos/:id/cancelar', async (req, res) => {
-  try {
-    const pago = await prisma.pago.update({
-      where: { id: parseInt(req.params.id) },
-      data: { estado: 'cancelado' }
-    })
-    res.json(pago)
-  } catch (e) {
-    res.status(500).json({ error: 'Error al cancelar el pago' })
   }
 })
 
@@ -549,7 +654,7 @@ app.put('/musico/:id', async (req, res) => {
   }
 })
 
-// ─── EDITAR PERFIL LOCAL ───────────────────────────────────────
+// ─── EDITAR PERFIL LOCAL ──────────────────────────────────────
 app.put('/local/:id', async (req, res) => {
   const { nombreNegocio, ubicacion, descripcion, foto, galeria } = req.body
   try {
@@ -582,8 +687,6 @@ app.delete('/usuario/:id', async (req, res) => {
     res.status(500).json({ error: 'Error al eliminar cuenta' })
   }
 })
-
-//funcione en web
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Backend corriendo en puerto ${PORT}`))
