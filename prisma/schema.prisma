@@ -14,19 +14,21 @@ model Rol {
 }
 
 model Usuario {
-  id             Int            @id @default(autoincrement())
-  nombre         String
-  email          String         @unique
-  password       String
-  telefono       String
-  activo         Boolean        @default(true)
-  rolId          Int
-  rol            Rol            @relation(fields: [rolId], references: [id])
-  creadoEn       DateTime       @default(now())
-  sessionToken   String?
-  musico         Musico?
-  local          Local?
-  notificaciones Notificacion[]
+  id                 Int            @id @default(autoincrement())
+  nombre             String
+  email              String         @unique
+  password           String
+  telefono           String
+  activo             Boolean        @default(true)
+  rolId              Int
+  rol                Rol            @relation(fields: [rolId], references: [id])
+  creadoEn           DateTime       @default(now())
+  sessionToken       String?
+  resetToken         String?
+  resetTokenExpira   DateTime?
+  musico             Musico?
+  local              Local?
+  notificaciones     Notificacion[]
 }
 
 model Genero {
