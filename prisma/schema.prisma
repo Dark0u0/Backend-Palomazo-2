@@ -103,6 +103,7 @@ model Pago {
   estado        String    @default("retenido")
   mpPagoId      String?
   musicoLlego   Boolean   @default(false)
+  resenado      Boolean   @default(false)
   fechaPago     DateTime?
   creadoEn      DateTime  @default(now())
 }

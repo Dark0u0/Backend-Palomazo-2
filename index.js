@@ -420,10 +420,58 @@ app.get('/pagos/local/:localId', async (req, res) => {
   try {
     const pagos = await prisma.pago.findMany({
       where: { solicitud: { localId: parseInt(req.params.localId) } },
-      include: { solicitud: { include: { musico: { select: { nombreArtistico: true } } } } },
+      include: {
+        solicitud: {
+          include: {
+            musico: { select: { nombreArtistico: true, foto: true } }
+          }
+        }
+      },
       orderBy: { creadoEn: 'desc' }
     })
     res.json(pagos)
+  } catch (e) {
+    res.status(500).json({ error: 'Error del servidor' })
+  }
+})
+
+// ─── CREAR RESEÑA ─────────────────────────────────────────────
+app.post('/resenas', async (req, res) => {
+  const { localId, musicoId, calificacion, comentario, pagoId } = req.body
+  try {
+    if (comentario && comentario.length > 500) {
+      return res.status(400).json({ error: 'El comentario no puede superar 500 caracteres' })
+    }
+    const resena = await prisma.resena.create({
+      data: {
+        localId: parseInt(localId),
+        musicoId: parseInt(musicoId),
+        calificacion: parseInt(calificacion),
+        comentario: comentario || null
+      }
+    })
+    if (pagoId) {
+      await prisma.pago.update({
+        where: { id: parseInt(pagoId) },
+        data: { resenado: true }
+      })
+    }
+    res.json(resena)
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Error al crear la reseña' })
+  }
+})
+
+// ─── OBTENER RESEÑAS DE UN MÚSICO ─────────────────────────────
+app.get('/resenas/musico/:musicoId', async (req, res) => {
+  try {
+    const resenas = await prisma.resena.findMany({
+      where: { musicoId: parseInt(req.params.musicoId) },
+      include: { local: { select: { nombreNegocio: true, foto: true } } },
+      orderBy: { creadoEn: 'desc' }
+    })
+    res.json(resenas)
   } catch (e) {
     res.status(500).json({ error: 'Error del servidor' })
   }
