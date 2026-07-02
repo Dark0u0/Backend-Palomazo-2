@@ -13,6 +13,41 @@ app.use(cors({
 }))
 app.use(express.json())
 
+// ─── MIDDLEWARE: VALIDAR SESIÓN ACTIVA ────────────────────────
+const validarSesion = async (req, res, next) => {
+  const authHeader = req.headers['authorization']
+  if (!authHeader) return next() // rutas públicas pasan sin token
+
+  const token = authHeader.split(' ')[1]
+  if (!token) return next()
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    const usuario = await prisma.usuario.findUnique({
+      where: { id: decoded.id },
+      select: { sessionToken: true, activo: true }
+    })
+
+    if (!usuario || !usuario.activo) {
+      return res.status(401).json({ error: 'Sesión inválida' })
+    }
+
+    if (usuario.sessionToken !== token) {
+      return res.status(401).json({ 
+        error: 'Tu sesión fue cerrada porque iniciaste sesión en otro dispositivo',
+        codigo: 'SESION_DESPLAZADA'
+      })
+    }
+
+    req.usuarioId = decoded.id
+    next()
+  } catch (e) {
+    next() // token inválido o expirado, deja pasar (las rutas públicas no lo necesitan)
+  }
+}
+
+app.use(validarSesion)
+
 // ─── OBTENER GÉNEROS ──────────────────────────────────────────
 app.get('/generos', async (req, res) => {
   try {
@@ -113,6 +148,12 @@ app.post('/auth/login', async (req, res) => {
       { expiresIn: '7d' }
     )
 
+    // Guardar el nuevo token como sesión activa (invalida la anterior)
+    await prisma.usuario.update({
+      where: { id: usuario.id },
+      data: { sessionToken: token }
+    })
+
     const perfil = usuario.musico
       ? {
           ...usuario.musico,
@@ -134,7 +175,21 @@ app.post('/auth/login', async (req, res) => {
     res.status(500).json({ error: 'Error del servidor' })
   }
 })
+// ─── LOGOUT ───────────────────────────────────────────────────
+app.post('/auth/logout', async (req, res) => {
+  const { id } = req.body
+  try {
+    await prisma.usuario.update({
+      where: { id: parseInt(id) },
+      data: { sessionToken: null }
+    })
+    res.json({ mensaje: 'Sesión cerrada' })
+  } catch (e) {
+    res.status(500).json({ error: 'Error al cerrar sesión' })
+  }
+})
 
+// ─── CONFIGURACIÓN CLOUDINARY ───────────────────────────────
 const cloudinary = require('cloudinary').v2
 const { CloudinaryStorage } = require('multer-storage-cloudinary')
 const multer = require('multer')

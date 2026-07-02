@@ -23,6 +23,7 @@ model Usuario {
   rolId          Int
   rol            Rol            @relation(fields: [rolId], references: [id])
   creadoEn       DateTime       @default(now())
+  sessionToken   String?
   musico         Musico?
   local          Local?
   notificaciones Notificacion[]
