@@ -518,9 +518,10 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
     })
     if (!solicitud) return res.status(404).json({ error: 'Solicitud no encontrada' })
 
+    const montoMusico = parseFloat(solicitud.montoMusico)
     const monto = parseFloat(solicitud.montoTotal)
-    const anticipo = +(monto * 0.35).toFixed(2)
-    const restante = +(monto - anticipo).toFixed(2)
+    const anticipo = +(montoMusico * 0.35).toFixed(2)
+    const restante = +(montoMusico - anticipo).toFixed(2)
 
     const pago = await prisma.pago.create({
       data: {
@@ -533,6 +534,7 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
         fechaPago: new Date()
       }
     })
+
     await prisma.solicitud.update({
       where: { id: parseInt(solicitudId) },
       data: { estado: 'pagada' }
