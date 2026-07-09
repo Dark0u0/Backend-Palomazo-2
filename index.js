@@ -533,7 +533,6 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
         fechaPago: new Date()
       }
     })
-
     await prisma.solicitud.update({
       where: { id: parseInt(solicitudId) },
       data: { estado: 'pagada' }
@@ -543,6 +542,121 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: 'Error al confirmar el pago' })
+  }
+})
+
+// ─── CREAR CUENTA CONNECT (músico se registra en Stripe) ──────
+app.post('/stripe/crear-cuenta-connect', async (req, res) => {
+  const { musicoId, email } = req.body
+  try {
+    // Crear cuenta Express en Stripe
+    const cuenta = await stripe.accounts.create({
+      type: 'express',
+      country: 'MX',
+      email: email,
+      capabilities: {
+        transfers: { requested: true }
+      }
+    })
+
+    // Guardar el stripeAccountId en la DB del músico
+    await prisma.musico.update({
+      where: { id: parseInt(musicoId) },
+      data: { stripeAccountId: cuenta.id }
+    })
+
+    res.json({ accountId: cuenta.id })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Error al crear cuenta de Stripe' })
+  }
+})
+
+// ─── GENERAR LINK DE ONBOARDING (músico llena sus datos) ──────
+app.post('/stripe/link-onboarding', async (req, res) => {
+  const { musicoId } = req.body
+  try {
+    const musico = await prisma.musico.findUnique({
+      where: { id: parseInt(musicoId) }
+    })
+
+    if (!musico?.stripeAccountId) {
+      return res.status(400).json({ error: 'El músico no tiene cuenta de Stripe' })
+    }
+
+    const link = await stripe.accountLinks.create({
+      account: musico.stripeAccountId,
+      refresh_url: `https://frontend-palomazo.vercel.app/dashboard/musico`,
+      return_url: `https://frontend-palomazo.vercel.app/dashboard/musico?stripe=ok`,
+      type: 'account_onboarding'
+    })
+
+    res.json({ url: link.url })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Error al generar link de onboarding' })
+  }
+})
+
+// ─── VERIFICAR SI MÚSICO TIENE CUENTA ACTIVA ──────────────────
+app.get('/stripe/estado-cuenta/:musicoId', async (req, res) => {
+  try {
+    const musico = await prisma.musico.findUnique({
+      where: { id: parseInt(req.params.musicoId) }
+    })
+
+    if (!musico?.stripeAccountId) {
+      return res.json({ conectado: false })
+    }
+
+    const cuenta = await stripe.accounts.retrieve(musico.stripeAccountId)
+    res.json({
+      conectado: cuenta.charges_enabled && cuenta.payouts_enabled,
+      accountId: musico.stripeAccountId
+    })
+  } catch (e) {
+    res.json({ conectado: false })
+  }
+})
+
+// ─── TRANSFERIR AL MÚSICO AL LIBERAR PAGO ─────────────────────
+app.put('/pagos/:id/liberar', async (req, res) => {
+  try {
+    const pagoActual = await prisma.pago.findUnique({
+      where: { id: parseInt(req.params.id) },
+      include: {
+        solicitud: {
+          include: {
+            musico: true
+          }
+        }
+      }
+    })
+
+    // Actualizar DB
+    const pago = await prisma.pago.update({
+      where: { id: parseInt(req.params.id) },
+      data: { estado: 'liberado', montoLiberado: pagoActual.monto, montoRetenido: 0, musicoLlego: true }
+    })
+
+    // Si el músico tiene cuenta de Stripe Connect, transferir
+    const musico = pagoActual.solicitud.musico
+    if (musico.stripeAccountId) {
+      const montoMusico = parseFloat(pagoActual.solicitud.montoMusico)
+      const montoEnCentavos = Math.round(montoMusico * 100)
+
+      await stripe.transfers.create({
+        amount: montoEnCentavos,
+        currency: 'mxn',
+        destination: musico.stripeAccountId,
+        source_transaction: pagoActual.mpPagoId
+      })
+    }
+
+    res.json(pago)
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Error al liberar el pago' })
   }
 })
 

@@ -56,6 +56,7 @@ model Musico {
   biografia       String?        @db.Text
   precioPorHora   Decimal        @db.Decimal(10, 2)
   localidad       String
+  stripeAccountId String?        // ← nuevo campo
   generos         MusicoGenero[]
   solicitudes     Solicitud[]
   resenas         Resena[]
