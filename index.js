@@ -4,10 +4,12 @@ const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const crypto = require('crypto')
 const nodemailer = require('nodemailer')
+const Stripe = require('stripe')
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
 
 const app = express()
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
 const prisma = new PrismaClient()
 
 app.use(cors({
@@ -478,12 +480,43 @@ app.put('/solicitudes/:id/responder', async (req, res) => {
   }
 })
 
-// ─── LOCAL PAGA (35% anticipo / 65% retenido) ─────────────────
-app.post('/solicitudes/:id/pagar', async (req, res) => {
+// ─── CREAR PAYMENT INTENT (Stripe) ───────────────────────────
+app.post('/stripe/crear-pago', async (req, res) => {
+  const { solicitudId } = req.body
   try {
-    const solicitud = await prisma.solicitud.findUnique({ where: { id: parseInt(req.params.id) } })
+    const solicitud = await prisma.solicitud.findUnique({
+      where: { id: parseInt(solicitudId) },
+      include: { musico: { select: { nombreArtistico: true } } }
+    })
     if (!solicitud) return res.status(404).json({ error: 'Solicitud no encontrada' })
     if (solicitud.estado !== 'aceptada') return res.status(400).json({ error: 'La solicitud no está aceptada' })
+
+    const montoEnCentavos = Math.round(parseFloat(solicitud.montoTotal) * 100)
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: montoEnCentavos,
+      currency: 'mxn',
+      metadata: {
+        solicitudId: solicitudId.toString(),
+        musico: solicitud.musico.nombreArtistico
+      }
+    })
+
+    res.json({ clientSecret: paymentIntent.client_secret })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Error al crear el pago' })
+  }
+})
+
+// ─── CONFIRMAR PAGO EXITOSO ───────────────────────────────────
+app.post('/stripe/confirmar-pago', async (req, res) => {
+  const { solicitudId, paymentIntentId } = req.body
+  try {
+    const solicitud = await prisma.solicitud.findUnique({
+      where: { id: parseInt(solicitudId) }
+    })
+    if (!solicitud) return res.status(404).json({ error: 'Solicitud no encontrada' })
 
     const monto = parseFloat(solicitud.montoTotal)
     const anticipo = +(monto * 0.35).toFixed(2)
@@ -491,19 +524,25 @@ app.post('/solicitudes/:id/pagar', async (req, res) => {
 
     const pago = await prisma.pago.create({
       data: {
-        solicitudId: solicitud.id,
+        solicitudId: parseInt(solicitudId),
         monto,
         montoRetenido: restante,
         montoLiberado: anticipo,
         estado: 'parcial',
+        mpPagoId: paymentIntentId,
         fechaPago: new Date()
       }
     })
-    await prisma.solicitud.update({ where: { id: solicitud.id }, data: { estado: 'pagada' } })
+
+    await prisma.solicitud.update({
+      where: { id: parseInt(solicitudId) },
+      data: { estado: 'pagada' }
+    })
+
     res.json(pago)
   } catch (e) {
     console.error(e)
-    res.status(500).json({ error: 'Error al procesar el pago' })
+    res.status(500).json({ error: 'Error al confirmar el pago' })
   }
 })
 
@@ -690,7 +729,6 @@ app.delete('/usuario/:id', async (req, res) => {
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Backend corriendo en puerto ${PORT}`))
-
 
 //para que cuncione local
 //app.listen(3000, () => console.log('Backend corriendo en http://localhost:3000'))
