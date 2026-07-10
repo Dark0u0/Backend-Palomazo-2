@@ -748,12 +748,42 @@ app.get('/pagos/local/:localId', async (req, res) => {
 // ─── CANCELAR PAGO ────────────────────────────────────────────
 app.put('/pagos/:id/cancelar', async (req, res) => {
   try {
+    const pagoActual = await prisma.pago.findUnique({
+      where: { id: parseInt(req.params.id) }
+    })
+    if (!pagoActual) return res.status(404).json({ error: 'Pago no encontrado' })
+
+    if (pagoActual.estado === 'liberado' || pagoActual.estado === 'cancelado') {
+      return res.status(400).json({ error: 'Este pago ya no se puede cancelar' })
+    }
+
+    // El 35% ya transferido al músico se queda con él (garantía por apartar la fecha).
+    // Solo reembolsamos al local el 65% restante, que nunca salió de nuestro balance.
+    const montoAReembolsar = parseFloat(pagoActual.montoRetenido)
+
+    if (pagoActual.mpPagoId && montoAReembolsar > 0) {
+      try {
+        await stripe.refunds.create({
+          charge: pagoActual.mpPagoId,
+          amount: Math.round(montoAReembolsar * 100)
+        })
+      } catch (stripeError) {
+        console.error('Error al reembolsar al local:', stripeError.message)
+        return res.status(500).json({ error: 'No se pudo procesar el reembolso. Intenta de nuevo.' })
+      }
+    }
+
     const pago = await prisma.pago.update({
       where: { id: parseInt(req.params.id) },
-      data: { estado: 'cancelado' }
+      data: {
+        estado: 'cancelado',
+        montoRetenido: 0 // ya se reembolsó, no queda nada retenido
+      }
     })
+
     res.json(pago)
   } catch (e) {
+    console.error(e)
     res.status(500).json({ error: 'Error al cancelar el pago' })
   }
 })
