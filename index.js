@@ -451,7 +451,36 @@ app.get('/solicitudes/musico/:musicoId', async (req, res) => {
       },
       orderBy: { creadoEn: 'desc' }
     })
-    res.json(solicitudes)
+
+    // Vista "segura" para el músico: solo su monto, sin comisionApp ni montoTotal
+    const solicitudesParaMusico = solicitudes.map(s => ({
+      id: s.id,
+      fecha: s.fecha,
+      duracionHoras: s.duracionHoras,
+      horaInicio: s.horaInicio,
+      horaFin: s.horaFin,
+      tipoEvento: s.tipoEvento,
+      notas: s.notas,
+      estado: s.estado,
+      local: s.local,
+      monto: s.montoMusico, // <- lo que el músico realmente cobra, ej. 500
+      pago: s.pago
+        ? {
+            id: s.pago.id,
+            estado: s.pago.estado,
+            fechaPago: s.pago.fechaPago,
+            musicoLlego: s.pago.musicoLlego,
+            resenado: s.pago.resenado,
+            // el músico ve su propio total (anticipo + restante = montoMusico),
+            // nunca pago.monto (que incluye la comisión del local)
+            montoTotal: +(parseFloat(s.pago.montoLiberado) + parseFloat(s.pago.montoRetenido)).toFixed(2),
+            montoLiberado: s.pago.montoLiberado,
+            montoRetenido: s.pago.montoRetenido
+          }
+        : null
+    }))
+
+    res.json(solicitudesParaMusico)
   } catch (e) {
     res.status(500).json({ error: 'Error del servidor' })
   }
@@ -494,22 +523,15 @@ app.post('/stripe/crear-pago', async (req, res) => {
     if (solicitud.estado !== 'aceptada') return res.status(400).json({ error: 'La solicitud no está aceptada' })
 
     const montoEnCentavos = Math.round(parseFloat(solicitud.montoTotal) * 100)
-    const comisionEnCentavos = Math.round(parseFloat(solicitud.comisionApp) * 100)
 
+    // El cobro se queda completo en tu cuenta principal de Stripe.
+    // Las transferencias al músico se hacen por separado, en confirmar-pago y en liberar.
     const paymentIntentData = {
       amount: montoEnCentavos,
       currency: 'mxn',
       metadata: {
         solicitudId: solicitudId.toString(),
         musico: solicitud.musico.nombreArtistico
-      }
-    }
-
-    // Si el músico tiene cuenta Connect, preparar la transferencia automática
-    if (solicitud.musico.stripeAccountId) {
-      paymentIntentData.application_fee_amount = comisionEnCentavos
-      paymentIntentData.transfer_data = {
-        destination: solicitud.musico.stripeAccountId
       }
     }
 
@@ -521,13 +543,15 @@ app.post('/stripe/crear-pago', async (req, res) => {
     res.status(500).json({ error: 'Error al crear el pago' })
   }
 })
-
 // ─── CONFIRMAR PAGO EXITOSO ───────────────────────────────────
 app.post('/stripe/confirmar-pago', async (req, res) => {
   const { solicitudId, paymentIntentId } = req.body
   try {
     const solicitud = await prisma.solicitud.findUnique({
-      where: { id: parseInt(solicitudId) }
+      where: { id: parseInt(solicitudId) },
+      include: {
+        musico: { select: { stripeAccountId: true } }
+      }
     })
     if (!solicitud) return res.status(404).json({ error: 'Solicitud no encontrada' })
 
@@ -535,6 +559,21 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
     const monto = parseFloat(solicitud.montoTotal)
     const anticipo = +(montoMusico * 0.35).toFixed(2)
     const restante = +(montoMusico - anticipo).toFixed(2)
+
+    // Transferencia REAL del anticipo (35%) al músico, si tiene cuenta Connect activa
+    if (solicitud.musico.stripeAccountId) {
+      try {
+        await stripe.transfers.create({
+          amount: Math.round(anticipo * 100),
+          currency: 'mxn',
+          destination: solicitud.musico.stripeAccountId,
+          source_transaction: paymentIntentId
+        })
+      } catch (stripeError) {
+        console.error('Error al transferir el anticipo:', stripeError.message)
+        // Puedes decidir si quieres detener el flujo aquí o continuar
+      }
+    }
 
     const pago = await prisma.pago.create({
       data: {
@@ -648,25 +687,35 @@ app.put('/pagos/:id/liberar', async (req, res) => {
       }
     })
 
-    // Actualizar DB
+    if (!pagoActual) return res.status(404).json({ error: 'Pago no encontrado' })
+
+    const musico = pagoActual.solicitud.musico
+    const restante = parseFloat(pagoActual.montoRetenido) // el 65% pendiente, no el total
+
+    // Transferencia REAL del restante (65%) al músico
+    if (musico.stripeAccountId && pagoActual.mpPagoId && restante > 0) {
+      try {
+        await stripe.transfers.create({
+          amount: Math.round(restante * 100),
+          currency: 'mxn',
+          destination: musico.stripeAccountId,
+          source_transaction: pagoActual.mpPagoId
+        })
+      } catch (stripeError) {
+        console.error('Error en transferencia Stripe:', stripeError.message)
+        // No fallamos el liberar aunque falle la transferencia, pero lo dejamos loggeado
+      }
+    }
+
     const pago = await prisma.pago.update({
       where: { id: parseInt(req.params.id) },
-      data: { estado: 'liberado', montoLiberado: pagoActual.monto, montoRetenido: 0, musicoLlego: true }
+      data: {
+        estado: 'liberado',
+        montoLiberado: pagoActual.monto,
+        montoRetenido: 0,
+        musicoLlego: true
+      }
     })
-
-    // Si el músico tiene cuenta de Stripe Connect, transferir
-    const musico = pagoActual.solicitud.musico
-    if (musico.stripeAccountId) {
-      const montoMusico = parseFloat(pagoActual.solicitud.montoMusico)
-      const montoEnCentavos = Math.round(montoMusico * 100)
-
-      await stripe.transfers.create({
-        amount: montoEnCentavos,
-        currency: 'mxn',
-        destination: musico.stripeAccountId,
-        source_transaction: pagoActual.mpPagoId
-      })
-    }
 
     res.json(pago)
   } catch (e) {
@@ -692,56 +741,6 @@ app.get('/pagos/local/:localId', async (req, res) => {
     res.json(pagos)
   } catch (e) {
     res.status(500).json({ error: 'Error del servidor' })
-  }
-})
-
-// ─── LIBERAR PAGO ─────────────────────────────────────────────
-app.put('/pagos/:id/liberar', async (req, res) => {
-  try {
-    const pagoActual = await prisma.pago.findUnique({
-      where: { id: parseInt(req.params.id) },
-      include: {
-        solicitud: {
-          include: {
-            musico: true
-          }
-        }
-      }
-    })
-
-    const pago = await prisma.pago.update({
-      where: { id: parseInt(req.params.id) },
-      data: {
-        estado: 'liberado',
-        montoLiberado: pagoActual.monto,
-        montoRetenido: 0,
-        musicoLlego: true
-      }
-    })
-
-    // Transferir al músico si tiene cuenta Connect
-    const musico = pagoActual.solicitud.musico
-    if (musico.stripeAccountId && pagoActual.mpPagoId) {
-      const montoMusico = parseFloat(pagoActual.solicitud.montoMusico)
-      const montoEnCentavos = Math.round(montoMusico * 100)
-
-      try {
-        await stripe.transfers.create({
-          amount: montoEnCentavos,
-          currency: 'mxn',
-          destination: musico.stripeAccountId,
-          source_transaction: pagoActual.mpPagoId
-        })
-      } catch (stripeError) {
-        console.error('Error en transferencia Stripe:', stripeError.message)
-        // No fallamos el liberar aunque falle la transferencia
-      }
-    }
-
-    res.json(pago)
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Error al liberar el pago' })
   }
 })
 
