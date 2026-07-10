@@ -560,18 +560,20 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
     const anticipo = +(montoMusico * 0.35).toFixed(2)
     const restante = +(montoMusico - anticipo).toFixed(2)
 
-    // Transferencia REAL del anticipo (35%) al músico, si tiene cuenta Connect activa
-    if (solicitud.musico.stripeAccountId) {
+    // Obtener el charge ID real (Stripe necesita ch_..., no pi_...)
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId)
+    const chargeId = paymentIntent.latest_charge
+
+    if (solicitud.musico.stripeAccountId && chargeId) {
       try {
         await stripe.transfers.create({
           amount: Math.round(anticipo * 100),
           currency: 'mxn',
           destination: solicitud.musico.stripeAccountId,
-          source_transaction: paymentIntentId
+          source_transaction: chargeId
         })
       } catch (stripeError) {
         console.error('Error al transferir el anticipo:', stripeError.message)
-        // Puedes decidir si quieres detener el flujo aquí o continuar
       }
     }
 
@@ -582,7 +584,7 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
         montoRetenido: restante,
         montoLiberado: anticipo,
         estado: 'parcial',
-        mpPagoId: paymentIntentId,
+        mpPagoId: chargeId || paymentIntentId, // guarda el charge id para usarlo en /liberar
         fechaPago: new Date()
       }
     })
@@ -598,7 +600,6 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
     res.status(500).json({ error: 'Error al confirmar el pago' })
   }
 })
-
 // ─── CREAR CUENTA CONNECT (músico se registra en Stripe) ──────
 app.post('/stripe/crear-cuenta-connect', async (req, res) => {
   const { musicoId, email } = req.body
