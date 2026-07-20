@@ -2,8 +2,6 @@ const express = require('express')
 const cors = require('cors')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
-const crypto = require('crypto')
-const nodemailer = require('nodemailer')
 const Stripe = require('stripe')
 const { PrismaClient } = require('@prisma/client')
 require('dotenv').config()
@@ -16,14 +14,6 @@ app.use(cors({
   origin: 'https://frontend-palomazo.vercel.app'
 }))
 app.use(express.json())
-
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASS
-  }
-})
 
 // ─── MIDDLEWARE: VALIDAR SESIÓN ACTIVA ────────────────────────
 const validarSesion = async (req, res, next) => {
@@ -201,84 +191,6 @@ app.post('/auth/logout', async (req, res) => {
   }
 })
 
-// ─── SOLICITAR RECUPERACIÓN DE CONTRASEÑA ─────────────────────
-app.post('/auth/recuperar', async (req, res) => {
-  const { email } = req.body
-  try {
-    const usuario = await prisma.usuario.findUnique({ where: { email } })
-
-    if (!usuario) {
-      return res.json({ mensaje: 'Si el email existe, recibirás un correo en breve' })
-    }
-
-    const token = crypto.randomBytes(32).toString('hex')
-    const expira = new Date(Date.now() + 60 * 60 * 1000)
-
-    await prisma.usuario.update({
-      where: { email },
-      data: { resetToken: token, resetTokenExpira: expira }
-    })
-
-    const linkReset = `https://frontend-palomazo.vercel.app/reset-password?token=${token}`
-
-    await transporter.sendMail({
-      from: `"Palomazo" <${process.env.GMAIL_USER}>`,
-      to: email,
-      subject: 'Recupera tu contraseña de Palomazo',
-      html: `
-        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #0F0F0F; color: #fff; border-radius: 12px;">
-          <h2 style="color: #7C3AED;">🎵 Palomazo</h2>
-          <p>Recibimos una solicitud para restablecer tu contraseña.</p>
-          <p>Haz clic en el botón de abajo. El link expira en <strong>1 hora</strong>.</p>
-          <a href="${linkReset}" style="display: inline-block; margin: 24px 0; padding: 14px 28px; background: #7C3AED; color: #fff; border-radius: 8px; text-decoration: none; font-weight: bold;">
-            Restablecer contraseña
-          </a>
-          <p style="color: #666; font-size: 13px;">Si no solicitaste esto, ignora este correo.</p>
-        </div>
-      `
-    })
-
-    res.json({ mensaje: 'Si el email existe, recibirás un correo en breve' })
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Error al procesar la solicitud' })
-  }
-})
-
-// ─── RESTABLECER CONTRASEÑA ────────────────────────────────────
-app.post('/auth/reset-password', async (req, res) => {
-  const { token, password } = req.body
-  try {
-    const usuario = await prisma.usuario.findFirst({
-      where: {
-        resetToken: token,
-        resetTokenExpira: { gt: new Date() }
-      }
-    })
-
-    if (!usuario) {
-      return res.status(400).json({ error: 'El link es inválido o ya expiró' })
-    }
-
-    const hash = await bcrypt.hash(password, 10)
-
-    await prisma.usuario.update({
-      where: { id: usuario.id },
-      data: {
-        password: hash,
-        resetToken: null,
-        resetTokenExpira: null,
-        sessionToken: null
-      }
-    })
-
-    res.json({ mensaje: 'Contraseña actualizada correctamente' })
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Error al restablecer la contraseña' })
-  }
-})
-
 const cloudinary = require('cloudinary').v2
 const { CloudinaryStorage } = require('multer-storage-cloudinary')
 const multer = require('multer')
@@ -452,7 +364,6 @@ app.get('/solicitudes/musico/:musicoId', async (req, res) => {
       orderBy: { creadoEn: 'desc' }
     })
 
-    // Vista "segura" para el músico: solo su monto, sin comisionApp ni montoTotal
     const solicitudesParaMusico = solicitudes.map(s => ({
       id: s.id,
       fecha: s.fecha,
@@ -463,7 +374,7 @@ app.get('/solicitudes/musico/:musicoId', async (req, res) => {
       notas: s.notas,
       estado: s.estado,
       local: s.local,
-      monto: s.montoMusico, // <- lo que el músico realmente cobra, ej. 500
+      monto: s.montoMusico,
       pago: s.pago
         ? {
             id: s.pago.id,
@@ -471,8 +382,6 @@ app.get('/solicitudes/musico/:musicoId', async (req, res) => {
             fechaPago: s.pago.fechaPago,
             musicoLlego: s.pago.musicoLlego,
             resenado: s.pago.resenado,
-            // el músico ve su propio total (anticipo + restante = montoMusico),
-            // nunca pago.monto (que incluye la comisión del local)
             montoTotal: +(parseFloat(s.pago.montoLiberado) + parseFloat(s.pago.montoRetenido)).toFixed(2),
             montoLiberado: s.pago.montoLiberado,
             montoRetenido: s.pago.montoRetenido
@@ -524,18 +433,14 @@ app.post('/stripe/crear-pago', async (req, res) => {
 
     const montoEnCentavos = Math.round(parseFloat(solicitud.montoTotal) * 100)
 
-    // El cobro se queda completo en tu cuenta principal de Stripe.
-    // Las transferencias al músico se hacen por separado, en confirmar-pago y en liberar.
-    const paymentIntentData = {
+    const paymentIntent = await stripe.paymentIntents.create({
       amount: montoEnCentavos,
       currency: 'mxn',
       metadata: {
         solicitudId: solicitudId.toString(),
         musico: solicitud.musico.nombreArtistico
       }
-    }
-
-    const paymentIntent = await stripe.paymentIntents.create(paymentIntentData)
+    })
 
     res.json({ clientSecret: paymentIntent.client_secret })
   } catch (e) {
@@ -543,6 +448,7 @@ app.post('/stripe/crear-pago', async (req, res) => {
     res.status(500).json({ error: 'Error al crear el pago' })
   }
 })
+
 // ─── CONFIRMAR PAGO EXITOSO ───────────────────────────────────
 app.post('/stripe/confirmar-pago', async (req, res) => {
   const { solicitudId, paymentIntentId } = req.body
@@ -560,7 +466,6 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
     const anticipo = +(montoMusico * 0.35).toFixed(2)
     const restante = +(montoMusico - anticipo).toFixed(2)
 
-    // Obtener el charge ID real (Stripe necesita ch_..., no pi_...)
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId)
     const chargeId = paymentIntent.latest_charge
 
@@ -584,7 +489,7 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
         montoRetenido: restante,
         montoLiberado: anticipo,
         estado: 'parcial',
-        mpPagoId: chargeId || paymentIntentId, // guarda el charge id para usarlo en /liberar
+        mpPagoId: chargeId || paymentIntentId,
         fechaPago: new Date()
       }
     })
@@ -600,26 +505,21 @@ app.post('/stripe/confirmar-pago', async (req, res) => {
     res.status(500).json({ error: 'Error al confirmar el pago' })
   }
 })
-// ─── CREAR CUENTA CONNECT (músico se registra en Stripe) ──────
+
+// ─── CREAR CUENTA CONNECT ─────────────────────────────────────
 app.post('/stripe/crear-cuenta-connect', async (req, res) => {
   const { musicoId, email } = req.body
   try {
-    // Crear cuenta Express en Stripe
     const cuenta = await stripe.accounts.create({
       type: 'express',
       country: 'MX',
       email: email,
-      capabilities: {
-        transfers: { requested: true }
-      }
+      capabilities: { transfers: { requested: true } }
     })
-
-    // Guardar el stripeAccountId en la DB del músico
     await prisma.musico.update({
       where: { id: parseInt(musicoId) },
       data: { stripeAccountId: cuenta.id }
     })
-
     res.json({ accountId: cuenta.id })
   } catch (e) {
     console.error(e)
@@ -627,25 +527,20 @@ app.post('/stripe/crear-cuenta-connect', async (req, res) => {
   }
 })
 
-// ─── GENERAR LINK DE ONBOARDING (músico llena sus datos) ──────
+// ─── GENERAR LINK DE ONBOARDING ───────────────────────────────
 app.post('/stripe/link-onboarding', async (req, res) => {
   const { musicoId } = req.body
   try {
-    const musico = await prisma.musico.findUnique({
-      where: { id: parseInt(musicoId) }
-    })
-
+    const musico = await prisma.musico.findUnique({ where: { id: parseInt(musicoId) } })
     if (!musico?.stripeAccountId) {
       return res.status(400).json({ error: 'El músico no tiene cuenta de Stripe' })
     }
-
     const link = await stripe.accountLinks.create({
       account: musico.stripeAccountId,
       refresh_url: `https://frontend-palomazo.vercel.app/dashboard/musico`,
       return_url: `https://frontend-palomazo.vercel.app/dashboard/musico?stripe=ok`,
       type: 'account_onboarding'
     })
-
     res.json({ url: link.url })
   } catch (e) {
     console.error(e)
@@ -653,17 +548,11 @@ app.post('/stripe/link-onboarding', async (req, res) => {
   }
 })
 
-// ─── VERIFICAR SI MÚSICO TIENE CUENTA ACTIVA ──────────────────
+// ─── VERIFICAR ESTADO CUENTA STRIPE ──────────────────────────
 app.get('/stripe/estado-cuenta/:musicoId', async (req, res) => {
   try {
-    const musico = await prisma.musico.findUnique({
-      where: { id: parseInt(req.params.musicoId) }
-    })
-
-    if (!musico?.stripeAccountId) {
-      return res.json({ conectado: false })
-    }
-
+    const musico = await prisma.musico.findUnique({ where: { id: parseInt(req.params.musicoId) } })
+    if (!musico?.stripeAccountId) return res.json({ conectado: false })
     const cuenta = await stripe.accounts.retrieve(musico.stripeAccountId)
     res.json({
       conectado: cuenta.charges_enabled && cuenta.payouts_enabled,
@@ -674,26 +563,18 @@ app.get('/stripe/estado-cuenta/:musicoId', async (req, res) => {
   }
 })
 
-// ─── TRANSFERIR AL MÚSICO AL LIBERAR PAGO ─────────────────────
+// ─── LIBERAR PAGO ─────────────────────────────────────────────
 app.put('/pagos/:id/liberar', async (req, res) => {
   try {
     const pagoActual = await prisma.pago.findUnique({
       where: { id: parseInt(req.params.id) },
-      include: {
-        solicitud: {
-          include: {
-            musico: true
-          }
-        }
-      }
+      include: { solicitud: { include: { musico: true } } }
     })
-
     if (!pagoActual) return res.status(404).json({ error: 'Pago no encontrado' })
 
     const musico = pagoActual.solicitud.musico
-    const restante = parseFloat(pagoActual.montoRetenido) // el 65% pendiente, no el total
+    const restante = parseFloat(pagoActual.montoRetenido)
 
-    // Transferencia REAL del restante (65%) al músico
     if (musico.stripeAccountId && pagoActual.mpPagoId && restante > 0) {
       try {
         await stripe.transfers.create({
@@ -704,18 +585,12 @@ app.put('/pagos/:id/liberar', async (req, res) => {
         })
       } catch (stripeError) {
         console.error('Error en transferencia Stripe:', stripeError.message)
-        // No fallamos el liberar aunque falle la transferencia, pero lo dejamos loggeado
       }
     }
 
     const pago = await prisma.pago.update({
       where: { id: parseInt(req.params.id) },
-      data: {
-        estado: 'liberado',
-        montoLiberado: pagoActual.monto,
-        montoRetenido: 0,
-        musicoLlego: true
-      }
+      data: { estado: 'liberado', montoLiberado: pagoActual.monto, montoRetenido: 0, musicoLlego: true }
     })
 
     res.json(pago)
@@ -732,9 +607,7 @@ app.get('/pagos/local/:localId', async (req, res) => {
       where: { solicitud: { localId: parseInt(req.params.localId) } },
       include: {
         solicitud: {
-          include: {
-            musico: { select: { nombreArtistico: true, foto: true } }
-          }
+          include: { musico: { select: { nombreArtistico: true, foto: true } } }
         }
       },
       orderBy: { creadoEn: 'desc' }
@@ -748,19 +621,13 @@ app.get('/pagos/local/:localId', async (req, res) => {
 // ─── CANCELAR PAGO ────────────────────────────────────────────
 app.put('/pagos/:id/cancelar', async (req, res) => {
   try {
-    const pagoActual = await prisma.pago.findUnique({
-      where: { id: parseInt(req.params.id) }
-    })
+    const pagoActual = await prisma.pago.findUnique({ where: { id: parseInt(req.params.id) } })
     if (!pagoActual) return res.status(404).json({ error: 'Pago no encontrado' })
-
     if (pagoActual.estado === 'liberado' || pagoActual.estado === 'cancelado') {
       return res.status(400).json({ error: 'Este pago ya no se puede cancelar' })
     }
 
-    // El 35% ya transferido al músico se queda con él (garantía por apartar la fecha).
-    // Solo reembolsamos al local el 65% restante, que nunca salió de nuestro balance.
     const montoAReembolsar = parseFloat(pagoActual.montoRetenido)
-
     if (pagoActual.mpPagoId && montoAReembolsar > 0) {
       try {
         await stripe.refunds.create({
@@ -775,12 +642,8 @@ app.put('/pagos/:id/cancelar', async (req, res) => {
 
     const pago = await prisma.pago.update({
       where: { id: parseInt(req.params.id) },
-      data: {
-        estado: 'cancelado',
-        montoRetenido: 0 // ya se reembolsó, no queda nada retenido
-      }
+      data: { estado: 'cancelado', montoRetenido: 0 }
     })
-
     res.json(pago)
   } catch (e) {
     console.error(e)
@@ -893,13 +756,7 @@ app.put('/local/:id', async (req, res) => {
   try {
     const local = await prisma.local.update({
       where: { id: parseInt(req.params.id) },
-      data: {
-        nombreNegocio,
-        ubicacion,
-        descripcion,
-        foto: foto || undefined,
-        galeria: galeria || undefined
-      }
+      data: { nombreNegocio, ubicacion, descripcion, foto: foto || undefined, galeria: galeria || undefined }
     })
     res.json({ mensaje: 'Local actualizado', local })
   } catch (e) {
@@ -923,6 +780,3 @@ app.delete('/usuario/:id', async (req, res) => {
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Backend corriendo en puerto ${PORT}`))
-
-//para que cuncione local
-//app.listen(3000, () => console.log('Backend corriendo en http://localhost:3000'))
